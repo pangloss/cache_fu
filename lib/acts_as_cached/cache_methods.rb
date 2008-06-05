@@ -76,6 +76,7 @@ module ActsAsCached
 
     def set_cache(cache_id, value, ttl = nil)
       returning(value) do |v|
+        #logger.fatal { "set #{ cache_id } with #{ Marshal.dump(value).length / 1024 }K" }
         v = @@nil_sentinel if v.nil?
         cache_store(:set, cache_key(cache_id), v, ttl || cache_config[:ttl] || 1500)
       end
@@ -147,9 +148,11 @@ module ActsAsCached
     def fetch_cache(cache_id)
       return if ActsAsCached.config[:skip_gets]
 
-      autoload_missing_constants do 
+      value = autoload_missing_constants do 
         cache_store(:get, cache_key(cache_id))
       end
+      #logger.fatal { "fetch #{ cache_id } with #{ (Marshal.dump(value).length / 1024.0 * 100).round / 100 }K" }
+      value
     end
 
     def fetch_cachable_data(cache_id = nil)
