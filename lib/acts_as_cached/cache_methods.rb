@@ -76,6 +76,7 @@ module ActsAsCached
 
     def set_cache(cache_id, value, ttl = nil)
       returning(value) do |v|
+        #logger.fatal { "set #{ cache_id } with #{ Marshal.dump(value).length / 1024 }K" }
         v = @@nil_sentinel if v.nil?
         cache_store(:set, cache_key(cache_id), v, ttl || cache_config[:ttl] || 1500)
       end
@@ -147,9 +148,11 @@ module ActsAsCached
     def fetch_cache(cache_id)
       return if ActsAsCached.config[:skip_gets]
 
-      autoload_missing_constants do 
+      value = autoload_missing_constants do 
         cache_store(:get, cache_key(cache_id))
       end
+      #logger.fatal { "fetch #{ cache_id } with #{ (Marshal.dump(value).length / 1024.0 * 100).round / 100 }K" }
+      value
     end
 
     def fetch_cachable_data(cache_id = nil)
@@ -218,6 +221,11 @@ module ActsAsCached
       if error.to_s[/undefined class|referred/] && !lazy_load[error.to_s.split.last.constantize] then retry
       else raise error end
     end
+
+    def add_expire_key_to(target, key, extra_exp_rules = [])
+      target.add_scoped_expire_key cache_key(key), extra_exp_rules
+    end
+
   end
 
   module InstanceMethods
@@ -283,6 +291,64 @@ module ActsAsCached
         Array(send(assoc)).compact.each { |item| item.expire_cache if item.respond_to?(:expire_cache) }
       end 
       expire_cache
+    end
+
+    def add_expire_key_to(target, key, extra_exp_rules = [])
+      target.add_scoped_expire_key self.class.cache_key("#{ id }:#{ key }", extra_exp_rules)
+    end
+
+    def add_expire_key(key, extra_exp_rules = [])
+      add_scoped_expire_key(self.class.cache_key(key), extra_exp_rules)
+    end
+
+    def add_scoped_expire_key(key, extra_exp_rules = [])
+      rk = "#{ id }:rules"
+      rule_keys = self.class.get_cache(rk) { [] }
+      new_rule_keys = (rule_keys + extra_exp_rules + ['expire_keys']).uniq.compact.sort
+      logger.debug { "add to #{ rk } keys: #{ new_rule_keys.inspect } (#{ rule_keys.length == new_rule_keys.length })" }
+      self.class.set_cache(rk, new_rule_keys) unless rule_keys.length == new_rule_keys.length
+      new_rule_keys.each do |rule|
+        ek = "#{ id }:#{ rule }"
+        exp_keys = self.class.get_cache(ek) { [] } 
+        new_exp_keys = (exp_keys + [key]).uniq.sort
+        logger.debug { "add to #{ ek } keys: #{ new_exp_keys.inspect } (#{ exp_keys.length != new_exp_keys.length })" }
+        if exp_keys.length != new_exp_keys.length
+          self.class.set_cache(ek, new_exp_keys)
+        end
+      end
+    end
+
+    # +exp_rules+ (an array) allow granular expiries by just 
+    # expiring the specific rule instead of sweeping the cache 
+    # for the entire object.  They must be specified in the 
+    # +extra_exp_rules+ array when adding the expire key.
+    def sweep_expire_keys(exp_rules = nil)
+      exp_keys = expiry_keys(exp_rules, true).values.flatten.uniq
+      logger.debug { "-- expiring keys: #{ exp_keys.inspect }" }
+      exp_keys.flatten.each do |key|
+        logger.debug { "==> Deleted #{ key }" }
+        self.class.cache_store(:delete, key)
+      end
+    end
+
+    def expiry_rules
+      self.class.get_cache("#{ id }:rules") { [] }
+    end
+    
+    def expiry_keys(exp_rules = nil, expire_rule_key = false)
+      exp_rules ||= expiry_rules
+      exp_rules.inject({}) do |h, rule|
+        rule_key = "#{ id }:#{ rule }"
+        h[rule] = self.class.get_cache(rule_key) { [] }
+        self.class.expire_cache rule_key if expire_rule_key
+        h
+      end
+    end
+    
+    # expires the cache and sweeps all expire keys for all rules
+    def sweep_cache(rules = nil)
+      expire_cache
+      sweep_expire_keys(rules)
     end
   end
   
